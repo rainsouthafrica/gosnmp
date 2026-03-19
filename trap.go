@@ -126,6 +126,10 @@ type TrapListener struct {
 	// OnNewTrap handles incoming Trap and Inform PDUs.
 	OnNewTrap TrapHandlerFunc
 
+	// If true, the authoritativeEngineID discovery report will be sent on any mismatch, not just malformed engineIDs.
+	// See RFC3414 3.2 3) for more details.
+	StrictAuthoritativeEngineIDCheck bool
+
 	// CloseTimeout is the max wait time for the socket to gracefully signal its closure.
 	CloseTimeout time.Duration
 
@@ -291,7 +295,7 @@ func (t *TrapListener) listenUDP(addr string) error {
 				snmpEngineID := securityParams.AuthoritativeEngineID
 				msgAuthoritativeEngineID := packetSecurityParams.AuthoritativeEngineID
 				if msgAuthoritativeEngineID != snmpEngineID {
-					if len(msgAuthoritativeEngineID) < 5 || len(msgAuthoritativeEngineID) > 32 {
+					if t.StrictAuthoritativeEngineIDCheck || len(msgAuthoritativeEngineID) < 5 || len(msgAuthoritativeEngineID) > 32 {
 						// RFC3411 section 5. – SnmpEngineID definition.
 						// SnmpEngineID is an OCTET STRING which size should be between 5 and 32
 						// According to RFC3414 3.2.3b: stop processing and report
