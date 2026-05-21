@@ -1094,6 +1094,243 @@ func TestSendV3EngineIdDiscovery(t *testing.T) {
 	result, err := gs.sendOneRequest(&getEngineIDRequest, true)
 	require.NoError(t, err, "sendOneRequest failed")
 
-	require.Equal(t, result.SecurityParameters.(*UsmSecurityParameters).AuthoritativeEngineID, authorativeEngineID, "invalid authoritativeEngineID")
-	require.Equal(t, result.PDUType, Report, "invalid received PDUType")
+	require.Equal(t, authorativeEngineID, result.SecurityParameters.(*UsmSecurityParameters).AuthoritativeEngineID, "invalid authoritativeEngineID")
+	require.Equal(t, Report, result.PDUType, "invalid received PDUType")
+	require.Equal(t, uint32(0), result.RequestID, "invalid report request ID")
+}
+
+func TestReceiveV3TrapAcceptsForeignAuthoritativeEngineID(t *testing.T) {
+	done := make(chan error, 1)
+	localEngineID := string([]byte{0x80, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04})
+	foreignEngineID := string([]byte{0x80, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x05})
+
+	tl, target, port := startTestV3TrapListener(t, &UsmSecurityParameters{
+		UserName:                 "test",
+		AuthoritativeEngineBoots: 1,
+		AuthoritativeEngineTime:  1,
+		AuthoritativeEngineID:    localEngineID,
+	}, NoAuthNoPriv, makeTestTrapHandler(done, Version3))
+	defer tl.Close()
+
+	gs := newTestGoSNMPv3(NoAuthNoPriv, &UsmSecurityParameters{
+		UserName:                 "test",
+		AuthoritativeEngineBoots: 1,
+		AuthoritativeEngineTime:  1,
+		AuthoritativeEngineID:    foreignEngineID,
+	})
+	gs.Target = target
+	gs.Port = port
+	require.NoError(t, gs.Connect())
+	defer gs.Conn.Close()
+
+	_, err := gs.SendTrap(SnmpTrap{
+		Variables: []SnmpPDU{{
+			Name:  trapTestOid,
+			Type:  OctetString,
+			Value: trapTestPayload,
+		}},
+	})
+	require.NoError(t, err)
+
+	waitForTestTrap(t, done)
+}
+
+func TestReceiveV3InformReportsUnknownEngineID(t *testing.T) {
+	handled := make(chan error, 1)
+	localEngineID := string([]byte{0x80, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04})
+	foreignEngineID := string([]byte{0x80, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x05})
+
+	tl, target, port := startTestV3TrapListener(t, &UsmSecurityParameters{
+		UserName:                 "test",
+		AuthoritativeEngineBoots: 1,
+		AuthoritativeEngineTime:  1,
+		AuthoritativeEngineID:    localEngineID,
+	}, NoAuthNoPriv, makeTestTrapHandler(handled, Version3))
+	defer tl.Close()
+
+	gs := newTestGoSNMPv3(NoAuthNoPriv, &UsmSecurityParameters{
+		UserName:                 "test",
+		AuthoritativeEngineBoots: 1,
+		AuthoritativeEngineTime:  1,
+		AuthoritativeEngineID:    foreignEngineID,
+	})
+	gs.Target = target
+	gs.Port = port
+	require.NoError(t, gs.Connect())
+	defer gs.Conn.Close()
+
+	inform := gs.mkSnmpPacket(InformRequest, []SnmpPDU{{
+		Name:  trapTestOid,
+		Type:  OctetString,
+		Value: trapTestPayload,
+	}}, 0, 0)
+	result, err := gs.sendOneRequest(inform, true)
+	require.NoError(t, err)
+	require.Equal(t, Report, result.PDUType)
+	require.Equal(t, usmStatsUnknownEngineIDs, result.Variables[0].Name)
+	require.Equal(t, uint32(0), result.RequestID)
+	require.Equal(t, localEngineID, result.SecurityParameters.(*UsmSecurityParameters).AuthoritativeEngineID)
+
+	select {
+	case err := <-handled:
+		require.NoError(t, err)
+		t.Fatal("received inform where an unknownEngineID report should stop processing")
+	default:
+	}
+}
+
+func TestReceiveV3TrapWithInvalidEngineIDDiscardsWithoutReport(t *testing.T) {
+	handled := make(chan error, 1)
+	localEngineID := string([]byte{0x80, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04})
+
+	tl, target, port := startTestV3TrapListener(t, &UsmSecurityParameters{
+		UserName:                 "test",
+		AuthoritativeEngineBoots: 1,
+		AuthoritativeEngineTime:  1,
+		AuthoritativeEngineID:    localEngineID,
+	}, NoAuthNoPriv, makeTestTrapHandler(handled, Version3))
+	defer tl.Close()
+
+	conn, err := net.Dial(udp, net.JoinHostPort(target, strconv.Itoa(int(port))))
+	require.NoError(t, err)
+	defer conn.Close()
+
+	err = sendRawV3Packet(conn, &SnmpPacket{
+		Version:       Version3,
+		MsgFlags:      NoAuthNoPriv,
+		SecurityModel: UserSecurityModel,
+		SecurityParameters: &UsmSecurityParameters{
+			UserName: "test",
+		},
+		ContextEngineID: localEngineID,
+		PDUType:         SNMPv2Trap,
+		Variables: []SnmpPDU{{
+			Name:  trapTestOid,
+			Type:  OctetString,
+			Value: trapTestPayload,
+		}},
+		Logger: NewLogger(log.New(io.Discard, "", 0)),
+	})
+	require.NoError(t, err)
+
+	requireNoRawResponse(t, conn)
+	select {
+	case err := <-handled:
+		require.NoError(t, err)
+		t.Fatal("received trap with invalid msgAuthoritativeEngineID")
+	default:
+	}
+}
+
+func TestReceiveV3AuthPrivInformReportsUnknownEngineIDBeforeDecrypt(t *testing.T) {
+	handled := make(chan error, 1)
+	localEngineID := string([]byte{0x80, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04})
+	foreignEngineID := string([]byte{0x80, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x05})
+	logger := NewLogger(log.New(io.Discard, "", 0))
+
+	tl, target, port := startTestV3TrapListener(t, &UsmSecurityParameters{
+		UserName:                 "test",
+		AuthenticationProtocol:   SHA,
+		AuthenticationPassphrase: "password",
+		PrivacyProtocol:          AES,
+		PrivacyPassphrase:        "password",
+		AuthoritativeEngineBoots: 1,
+		AuthoritativeEngineTime:  1,
+		AuthoritativeEngineID:    localEngineID,
+	}, AuthPriv, makeTestTrapHandler(handled, Version3))
+	defer tl.Close()
+
+	conn, err := net.Dial(udp, net.JoinHostPort(target, strconv.Itoa(int(port))))
+	require.NoError(t, err)
+	defer conn.Close()
+
+	security := &UsmSecurityParameters{
+		UserName:                 "test",
+		AuthenticationProtocol:   SHA,
+		AuthenticationPassphrase: "password",
+		PrivacyProtocol:          AES,
+		PrivacyPassphrase:        "password",
+		AuthoritativeEngineBoots: 1,
+		AuthoritativeEngineTime:  1,
+		AuthoritativeEngineID:    foreignEngineID,
+		Logger:                   logger,
+	}
+	require.NoError(t, security.init(logger))
+	require.NoError(t, security.InitSecurityKeys())
+
+	packet := &SnmpPacket{
+		Version:            Version3,
+		MsgFlags:           AuthPriv | Reportable,
+		SecurityModel:      UserSecurityModel,
+		SecurityParameters: security.Copy(),
+		ContextEngineID:    localEngineID,
+		PDUType:            InformRequest,
+		MsgID:              1824792385,
+		RequestID:          1411852680,
+		MsgMaxSize:         65507,
+		Variables: []SnmpPDU{{
+			Name:  trapTestOid,
+			Type:  OctetString,
+			Value: trapTestPayload,
+		}},
+		Logger: logger,
+	}
+	require.NoError(t, packet.SecurityParameters.InitPacket(packet))
+	require.NoError(t, sendRawV3Packet(conn, packet))
+
+	response := readRawV3Response(t, conn)
+	decoder := newTestGoSNMPv3(NoAuthNoPriv, &UsmSecurityParameters{})
+	decoder.Logger = logger
+	result, err := decoder.UnmarshalTrap(response, true)
+	require.NoError(t, err)
+	require.Equal(t, Report, result.PDUType)
+	require.Equal(t, usmStatsUnknownEngineIDs, result.Variables[0].Name)
+	require.Equal(t, uint32(0), result.RequestID)
+	require.Equal(t, localEngineID, result.SecurityParameters.(*UsmSecurityParameters).AuthoritativeEngineID)
+
+	select {
+	case err := <-handled:
+		require.NoError(t, err)
+		t.Fatal("received authPriv inform where an unknownEngineID report should stop processing")
+	default:
+	}
+}
+
+func startTestV3TrapListener(t *testing.T, sp *UsmSecurityParameters, flags SnmpV3MsgFlags, handler TrapHandlerFunc) (*TrapListener, string, uint16) {
+	t.Helper()
+
+	tl := NewTrapListener()
+	tl.OnNewTrap = handler
+	tl.Params = newTestGoSNMPv3(flags, sp)
+
+	addr, port := listenOnEphemeral(t, tl)
+	return tl, addr, port
+}
+
+func sendRawV3Packet(conn net.Conn, packet *SnmpPacket) error {
+	msg, err := packet.marshalMsg()
+	if err != nil {
+		return err
+	}
+	_, err = conn.Write(msg)
+	return err
+}
+
+func readRawV3Response(t *testing.T, conn net.Conn) []byte {
+	t.Helper()
+
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(2*time.Second)))
+	buf := make([]byte, 4096)
+	n, err := conn.Read(buf)
+	require.NoError(t, err)
+	return buf[:n]
+}
+
+func requireNoRawResponse(t *testing.T, conn net.Conn) {
+	t.Helper()
+
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(200*time.Millisecond)))
+	buf := make([]byte, 4096)
+	_, err := conn.Read(buf)
+	require.Error(t, err)
 }
