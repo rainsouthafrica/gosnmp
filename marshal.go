@@ -103,6 +103,72 @@ const (
 
 //go:generate stringer -type=PDUType
 
+// PDU classes according to RFC 3411, 2.8
+
+func (p PDUType) ReadClass() bool {
+	switch p {
+	case GetRequest, GetNextRequest, GetBulkRequest:
+		return true
+	}
+	return false
+}
+
+func (p PDUType) WriteClass() bool {
+	switch p {
+	case SetRequest:
+		return true
+	}
+	return false
+}
+
+func (p PDUType) ResponseClass() bool {
+	switch p {
+	case GetResponse, Report:
+		return true
+	}
+	return false
+}
+
+func (p PDUType) NotificationClass() bool {
+	switch p {
+	case Trap, SNMPv2Trap, InformRequest:
+		return true
+	}
+	return false
+}
+
+func (p PDUType) InternalClass() bool {
+	switch p {
+	case Report:
+		return true
+	}
+	return false
+}
+
+func (p PDUType) ConfirmedClass() bool {
+	switch p {
+	case GetRequest, GetNextRequest, GetBulkRequest, SetRequest, InformRequest:
+		return true
+	}
+	return false
+}
+
+func (p PDUType) UnconfirmedClass() bool {
+	switch p {
+	case Report, Trap, SNMPv2Trap, GetResponse:
+		return true
+	}
+	return false
+}
+
+func (p PDUType) Valid() bool {
+	switch p {
+	case Sequence, GetRequest, GetNextRequest, GetResponse, SetRequest, Trap, GetBulkRequest, InformRequest, SNMPv2Trap, Report:
+		return true
+	}
+	return false
+}
+
 // SNMPv3: User-based Security Model Report PDUs and
 // error types as per https://tools.ietf.org/html/rfc3414
 const (
