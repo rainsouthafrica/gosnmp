@@ -131,28 +131,30 @@ const (
 
 // UsmSecurityParameters is an implementation of SnmpV3SecurityParameters for the UserSecurityModel
 type UsmSecurityParameters struct {
-	mu sync.Mutex
+	// this struct is a mix of wire fields, configuration, and runtime/scratch space
+
+	mu sync.Mutex // runtime
 	// localAESSalt must be 64bit aligned to use with atomic operations.
-	localAESSalt uint64
-	localDESSalt uint32
+	localAESSalt uint64 // runtime
+	localDESSalt uint32 // runtime
 
-	AuthoritativeEngineID    string
-	AuthoritativeEngineBoots uint32
-	AuthoritativeEngineTime  uint32
-	UserName                 string
-	AuthenticationParameters string
-	PrivacyParameters        []byte
+	AuthoritativeEngineID    string // wire, config
+	AuthoritativeEngineBoots uint32 // wire
+	AuthoritativeEngineTime  uint32 // wire
+	UserName                 string // wire, config
+	AuthenticationParameters string // wire
+	PrivacyParameters        []byte // wire
 
-	AuthenticationProtocol SnmpV3AuthProtocol
-	PrivacyProtocol        SnmpV3PrivProtocol
+	AuthenticationProtocol SnmpV3AuthProtocol // config
+	PrivacyProtocol        SnmpV3PrivProtocol // config
 
-	AuthenticationPassphrase string
-	PrivacyPassphrase        string
+	AuthenticationPassphrase string // config
+	PrivacyPassphrase        string // config
 
-	SecretKey  []byte
-	PrivacyKey []byte
+	SecretKey  []byte // runtime; derived from AuthenticationPassphrase & AuthoritativeEngineID
+	PrivacyKey []byte // runtime; derived from PrivacyPassphrase & AuthoritativeEngineID
 
-	Logger Logger
+	Logger Logger // runtime
 }
 
 func (sp *UsmSecurityParameters) getIdentifier() string {
