@@ -35,8 +35,18 @@ func (x *GoSNMP) SendTrap(trap SnmpTrap) (result *SnmpPacket, err error) {
 
 	switch x.Version {
 	case Version2c, Version3:
-		// Default to a v2 trap.
-		pdutype = SNMPv2Trap
+		if trap.IsInform {
+			pdutype = InformRequest
+		} else {
+			pdutype = SNMPv2Trap
+		}
+
+		// RFC 3412, 7.1.7.d: Confirmed Class PDUs must have Reportable flag on.
+		// This ensures that the authoritative engine will return a Report PDU containing
+		// engineBoots and engineTime for time synchronization which is required before
+		// authenticated communication can succeed. Without this, the engine may reject
+		// the Inform as out-of-time-window or unknown engine.
+		x.MsgFlags.SetReportable(pdutype.ConfirmedClass())
 
 		if len(trap.Variables) == 0 {
 			return nil, fmt.Errorf("function SendTrap requires at least 1 PDU")
@@ -47,28 +57,6 @@ func (x *GoSNMP) SendTrap(trap SnmpTrap) (result *SnmpPacket, err error) {
 			if _, ok := trap.Variables[0].Value.(uint32); !ok {
 				return nil, fmt.Errorf("function SendTrap TimeTick must be uint32")
 			}
-		}
-
-		switch x.MsgFlags {
-		// as per https://www.rfc-editor.org/rfc/rfc3412.html#section-6.4
-		// The reportableFlag MUST always be zero when the message contains
-		// a PDU from the Unconfirmed Class such as an SNMPv2-trap PDU
-		case 0x4, 0x5, 0x7:
-			// .. therefor bitclear the Reportable flag from the MsgFlags
-			// that we inherited from validateParameters()
-			x.MsgFlags = (x.MsgFlags &^ Reportable)
-		}
-
-		// If it's an inform, do that instead.
-		if trap.IsInform {
-			pdutype = InformRequest
-			// Per RFC 3414 Section 4:
-			// When sending an SNMPv3 InformRequest, the Reportable flag MUST be set in MsgFlags.
-			// This ensures that the authoritative engine will return a Report PDU containing
-			// engineBoots and engineTime for time synchronization which is required before
-			// authenticated communication can succeed. Without this, the engine may reject
-			// the Inform as out-of-time-window or unknown engine.
-			x.MsgFlags = (x.MsgFlags | Reportable)
 		}
 
 		if trap.Variables[0].Type != TimeTicks {

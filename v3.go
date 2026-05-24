@@ -29,6 +29,19 @@ const (
 
 //go:generate stringer -type=SnmpV3MsgFlags
 
+func (f SnmpV3MsgFlags) HasAuth() bool                 { return f&0x1 != 0 }
+func (f SnmpV3MsgFlags) HasPriv() bool                 { return f&0x2 != 0 }
+func (f SnmpV3MsgFlags) SecurityLevel() SnmpV3MsgFlags { return f & 0x3 }
+func (f SnmpV3MsgFlags) Reportable() bool              { return f&0x4 != 0 }
+
+func (f *SnmpV3MsgFlags) SetReportable(v bool) {
+	if v {
+		*f |= Reportable
+	} else {
+		*f &= ^Reportable
+	}
+}
+
 // SnmpV3SecurityModel describes the security model used by a SnmpV3 connection
 type SnmpV3SecurityModel uint8
 
@@ -87,7 +100,7 @@ func (packet *SnmpPacket) authenticate(msg []byte) ([]byte, error) {
 	if packet.Version != Version3 {
 		return msg, nil
 	}
-	if packet.MsgFlags&AuthNoPriv > 0 {
+	if packet.MsgFlags.HasAuth() {
 		err := packet.SecurityParameters.authenticate(msg)
 		if err != nil {
 			return nil, err
@@ -110,14 +123,15 @@ func (x *GoSNMP) testAuthentication(packet []byte, result *SnmpPacket, useRespon
 	// skip authentication for the discovery packet with the special settings
 	// described in the RFC. The discovery package requires
 	msgSecParams := result.SecurityParameters.(*UsmSecurityParameters)
-	if msgFlags&NoAuthNoPriv == 0 && // NoAuthNoPriv method
-		msgSecParams.UserName == "" && // empty username
+	// TODO: we also had this expression below, always true and likely a bug, needs to be revisited
+	// msgFlags&NoAuthNoPriv == 0 && // noAuthNoPriv security level
+	if msgSecParams.UserName == "" && // empty username
 		msgSecParams.AuthoritativeEngineID == "" && // empty authoritative engine ID
 		len(result.Variables) == 0 { // empty variable binding list
 		return nil
 	}
 
-	if msgFlags&AuthNoPriv > 0 {
+	if msgFlags.HasAuth() {
 		var authentic bool
 		var err error
 		if useResponseSecurityParameters {
@@ -137,7 +151,7 @@ func (x *GoSNMP) testAuthentication(packet []byte, result *SnmpPacket, useRespon
 }
 
 func (x *GoSNMP) initPacket(packetOut *SnmpPacket) error {
-	if x.MsgFlags&AuthPriv > AuthNoPriv {
+	if x.MsgFlags.HasPriv() {
 		return x.SecurityParameters.InitPacket(packetOut)
 	}
 
@@ -323,7 +337,7 @@ func (packet *SnmpPacket) marshalV3ScopedPDU() ([]byte, error) {
 	}
 	b = append([]byte{byte(Sequence)}, pduLen...)
 	scopedPdu = append(b, scopedPdu...)
-	if packet.MsgFlags&AuthPriv > AuthNoPriv {
+	if packet.MsgFlags.HasPriv() {
 		scopedPdu, err = packet.SecurityParameters.encryptPacket(scopedPdu)
 		if err != nil {
 			return nil, err

@@ -336,9 +336,7 @@ func (sp *UsmSecurityParameters) setSecurityParameters(in SnmpV3SecurityParamete
 }
 
 func (sp *UsmSecurityParameters) validate(flags SnmpV3MsgFlags) error {
-	securityLevel := flags & AuthPriv // isolate flags that determine security level
-
-	switch securityLevel {
+	switch flags.SecurityLevel() {
 	case AuthPriv:
 		if sp.PrivacyProtocol <= NoPriv {
 			return fmt.Errorf("securityParameters.PrivacyProtocol is required")
@@ -644,7 +642,7 @@ func (sp *UsmSecurityParameters) InitPacket(packet *SnmpPacket) error {
 	// http://tools.ietf.org/html/rfc2574#section-8.1.1.1
 	// localDESSalt needs to be incremented on every packet.
 	newSalt := sp.usmAllocateNewSalt()
-	if packet.MsgFlags&AuthPriv > AuthNoPriv {
+	if packet.MsgFlags.HasPriv() {
 		s, err := castUsmSecParams(packet.SecurityParameters)
 		if err != nil {
 			return err
@@ -944,13 +942,13 @@ func (sp *UsmSecurityParameters) marshal(flags SnmpV3MsgFlags) ([]byte, error) {
 	buf.WriteString(sp.UserName)
 
 	// msgAuthenticationParameters
-	if flags&AuthNoPriv > 0 {
+	if flags.HasAuth() {
 		buf.Write(macVarbinds[sp.AuthenticationProtocol])
 	} else {
 		buf.Write([]byte{byte(OctetString), 0})
 	}
 	// msgPrivacyParameters
-	if flags&AuthPriv > AuthNoPriv {
+	if flags.HasPriv() {
 		privlen, err2 := marshalLength(len(sp.PrivacyParameters))
 		if err2 != nil {
 			return nil, err2
@@ -1050,7 +1048,7 @@ func (sp *UsmSecurityParameters) unmarshal(flags SnmpV3MsgFlags, packet []byte, 
 		sp.Logger.Printf("Parsed authenticationParameters %s", msgAuthenticationParameters)
 	}
 	// blank msgAuthenticationParameters to prepare for authentication check later
-	if flags&AuthNoPriv > 0 {
+	if flags.HasAuth() {
 		// In case if the authentication protocol is not configured or set to NoAuth, then the packet cannot
 		// be processed further
 		if sp.AuthenticationProtocol <= NoAuth {
