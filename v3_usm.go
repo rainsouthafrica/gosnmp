@@ -685,6 +685,13 @@ func calcPacketDigest(packetBytes []byte, secParams *UsmSecurityParameters) ([]b
 	var digest []byte
 	var err error
 
+	proto := secParams.AuthenticationProtocol
+	if proto <= NoAuth {
+		return nil, errors.New("error parsing SNMPv3 User Security Model: authentication parameters are not configured to parse incoming authenticated message")
+	} else if int(proto) >= len(macVarbinds) || len(macVarbinds[proto]) < 2 {
+		return nil, fmt.Errorf("unsupported SNMPv3 authentication protocol %d", proto)
+	}
+
 	switch secParams.AuthenticationProtocol {
 	case MD5, SHA:
 		digest, err = digestRFC3414(
@@ -1048,15 +1055,13 @@ func (sp *UsmSecurityParameters) unmarshal(flags SnmpV3MsgFlags, packet []byte, 
 	if msgAuthenticationParameters, ok := rawMsgAuthParameters.(string); ok {
 		sp.AuthenticationParameters = msgAuthenticationParameters
 		sp.Logger.Printf("Parsed authenticationParameters %s", msgAuthenticationParameters)
-	}
-	// blank msgAuthenticationParameters to prepare for authentication check later
-	if flags.HasAuth() {
-		// In case if the authentication protocol is not configured or set to NoAuth, then the packet cannot
-		// be processed further
-		if sp.AuthenticationProtocol <= NoAuth {
-			return 0, errors.New("error parsing SNMPv3 User Security Model: authentication parameters are not configured to parse incoming authenticated message")
+
+		// TODO: consider moving the blanking to where the digest is calculated
+		// RFC3414 Section 6.3.2/7.3.2 authenticates the whole message with msgAuthenticationParameters replaced by zero octets.
+		// msgAuthenticationParameters' type+length field may be variable-length, thus the weird formula for 'from'
+		if flags.HasAuth() {
+			clear(packet[cursor+count-len(msgAuthenticationParameters) : cursor+count])
 		}
-		copy(packet[cursor+2:cursor+len(macVarbinds[sp.AuthenticationProtocol])], macVarbinds[sp.AuthenticationProtocol][2:])
 	}
 	cursor += count
 

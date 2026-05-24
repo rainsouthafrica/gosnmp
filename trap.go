@@ -501,7 +501,9 @@ func (x *GoSNMP) UnmarshalTrap(trap []byte, useResponseSecurityParameters bool) 
 func (x *GoSNMP) getTrapIdentifier(trap []byte) (string, error) {
 	// Initialize a packet with no auth/priv to unmarshal ID/key for security parameters to use
 	packet := new(SnmpPacket)
-	_, err := x.unmarshalHeader(trap, packet)
+	cpTrap := make([]byte, len(trap))
+	copy(cpTrap, trap)
+	_, err := x.unmarshalHeader(cpTrap, packet)
 	// Return err if no identifier was able to be parsed after unmarshaling
 	if err != nil && packet.SecurityParameters.getIdentifier() == "" {
 		return "", err
