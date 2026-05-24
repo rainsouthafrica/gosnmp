@@ -119,6 +119,7 @@ func (x *GoSNMP) testAuthentication(packet []byte, result *SnmpPacket, useRespon
 		msgFlags = result.MsgFlags
 	}
 
+	// TODO: trap handling does this elsewhere now. make sure sendOneRequest does not rely on it, and drop
 	// Special case for Engine Discovery (RFC3414 section 4) where we should
 	// skip authentication for the discovery packet with the special settings
 	// described in the RFC. The discovery package requires

@@ -5,6 +5,7 @@
 package gosnmp
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -255,13 +256,23 @@ func (t *TrapListener) listenUDP(addr string) error {
 }
 
 func (t *TrapListener) handleTrapMessage(msg []byte, remote *net.UDPAddr, respond func(*SnmpPacket) error) {
-	trap, err := t.Params.UnmarshalTrap(msg, false)
+	trap, cursor, err := t.Params.unmarshalTrapHeader(msg)
 	if err != nil {
 		t.Params.Logger.Printf("TrapListener: error in UnmarshalTrap %s\n", err)
 		return
 	}
 
 	if !t.verifyAuthoritativeEngineID(trap, respond) {
+		return
+	}
+
+	if trap.MsgFlags.SecurityLevel() < t.Params.MsgFlags.SecurityLevel() {
+		t.Params.Logger.Printf("TrapListener: insufficient security level in received trap\n")
+		return
+	}
+
+	if err := t.Params.unmarshalTrapPayload(msg, trap, cursor); err != nil {
+		t.Params.Logger.Printf("TrapListener: error in UnmarshalTrap %s\n", err)
 		return
 	}
 
@@ -318,18 +329,21 @@ func (t *TrapListener) verifyAuthoritativeEngineID(msg *SnmpPacket, respond func
 	remoteEngineIDValid := len(msgSec.AuthoritativeEngineID) >= 5 && len(msgSec.AuthoritativeEngineID) <= 32
 
 	//RFC 3412 section 6.4: if known, PDU class trumps flag
-	reportable := msg.PDUType.ConfirmedClass()
-	if !msg.PDUType.Valid() {
-		reportable = msg.MsgFlags.Reportable()
-	}
+	//reportable := msg.PDUType.ConfirmedClass()
+	//if !msg.PDUType.Valid() {
+	//	reportable = msg.MsgFlags.Reportable()
+	//}
+	reportable := msg.MsgFlags.Reportable()
 
 	// RFC3414 section 1.5.1: for an Unconfirmed Class PDU, the sender is authoritative.
 	// RFC3414 section 3.2 step 3a permits a non-authoritative receiver to continue processing a valid foreign engine ID.
-	if remoteEngineIDValid && msg.PDUType.UnconfirmedClass() {
+	//if remoteEngineIDValid && msg.PDUType.UnconfirmedClass() {
+	if remoteEngineIDValid && !reportable {
 		return true
 	}
 
-	if remoteEngineIDValid && msg.PDUType.ConfirmedClass() && msgSec.AuthoritativeEngineID == localSec.AuthoritativeEngineID {
+	//if remoteEngineIDValid && msg.PDUType.ConfirmedClass() && msgSec.AuthoritativeEngineID == localSec.AuthoritativeEngineID {
+	if remoteEngineIDValid && reportable && msgSec.AuthoritativeEngineID == localSec.AuthoritativeEngineID {
 		return true
 	}
 
@@ -466,89 +480,98 @@ func (t *TrapListener) debugTrapHandler(s *SnmpPacket, u *net.UDPAddr) {
 
 // UnmarshalTrap unpacks the SNMP Trap.
 func (x *GoSNMP) UnmarshalTrap(trap []byte, useResponseSecurityParameters bool) (result *SnmpPacket, err error) {
-	// Get only the version from the header of the trap
-	version, _, err := x.unmarshalVersionFromHeader(trap, new(SnmpPacket))
+	// TODO: Move logic from handleTrap here, using newfangled reportableErrors
+
+	result, cursor, err := x.unmarshalTrapHeader(trap)
 	if err != nil {
-		x.Logger.Printf("UnmarshalTrap version unmarshal: %s\n", err)
-		return nil, err
+		x.Logger.Printf("TrapListener: error in UnmarshalTrap %s\n", err)
+		return
 	}
-	// If there are multiple users configured and the SNMP trap is v3, see which user has valid credentials
-	// by iterating through the list matching the identifier and seeing which credentials are authentic / can be used to decrypt
-	if x.TrapSecurityParametersTable != nil && version == Version3 {
-		identifier, err := x.getTrapIdentifier(trap)
-		if err != nil {
-			x.Logger.Printf("UnmarshalTrap V3 get trap identifier: %s\n", err)
-			return nil, err
-		}
-		secParamsList, err := x.TrapSecurityParametersTable.Get(identifier)
-		if err != nil {
-			x.Logger.Printf("UnmarshalTrap V3 get security parameters from table: %s\n", err)
-			return nil, err
-		}
-		for _, secParams := range secParamsList {
-			// Copy the trap and pass the security parameters to try to unmarshal with
-			cpTrap := make([]byte, len(trap))
-			copy(cpTrap, trap)
-			if result, err = x.unmarshalTrapBase(cpTrap, secParams.Copy(), true); err == nil {
-				return result, nil
-			}
-		}
-		return nil, fmt.Errorf("no credentials successfully unmarshaled trap: %w", err)
+
+	if err = x.unmarshalTrapPayload(trap, result, cursor); err != nil {
+		x.Logger.Printf("TrapListener: error in UnmarshalTrap %s\n", err)
+		return
 	}
-	return x.unmarshalTrapBase(trap, nil, useResponseSecurityParameters)
+	return
 }
 
-func (x *GoSNMP) getTrapIdentifier(trap []byte) (string, error) {
-	// Initialize a packet with no auth/priv to unmarshal ID/key for security parameters to use
-	packet := new(SnmpPacket)
-	cpTrap := make([]byte, len(trap))
-	copy(cpTrap, trap)
-	_, err := x.unmarshalHeader(cpTrap, packet)
-	// Return err if no identifier was able to be parsed after unmarshaling
-	if err != nil && packet.SecurityParameters.getIdentifier() == "" {
-		return "", err
-	}
-	return packet.SecurityParameters.getIdentifier(), nil
-}
-
-func (x *GoSNMP) unmarshalTrapBase(trap []byte, sp SnmpV3SecurityParameters, useResponseSecurityParameters bool) (*SnmpPacket, error) {
-	result := new(SnmpPacket)
-
-	if x.SecurityParameters != nil && sp == nil {
-		err := x.SecurityParameters.InitSecurityKeys()
-		if err != nil {
-			return nil, err
-		}
-		result.SecurityParameters = x.SecurityParameters.Copy()
-	} else {
-		result.SecurityParameters = sp
-	}
-
-	cursor, err := x.unmarshalHeader(trap, result)
+func (x *GoSNMP) unmarshalTrapHeader(trap []byte) (result *SnmpPacket, cursor int, err error) {
+	result = new(SnmpPacket)
+	cursor, err = x.unmarshalHeader(trap, result)
 	if err != nil {
 		x.Logger.Printf("UnmarshalTrap: %s\n", err)
-		return nil, err
+		return nil, 0, err
 	}
+	return
+}
 
+func (x *GoSNMP) unmarshalTrapPayload(trap []byte, result *SnmpPacket, cursor int) (err error) {
+	// If there are multiple users configured and the SNMP trap is v3, see which user has valid credentials
+	// by iterating through the list matching the identifier and seeing which credentials are authentic / can be used to decrypt
+	if x.TrapSecurityParametersTable != nil && result.Version == Version3 {
+		secParamsList, err := x.TrapSecurityParametersTable.Get(result.SecurityParameters.getIdentifier())
+		if err != nil {
+			x.Logger.Printf("UnmarshalTrap V3 get security parameters from table: %s\n", err)
+			return err
+		}
+		for _, secParams := range secParamsList {
+			// Decryption currently happens in-place, and later unmarshalling error will fail current attempt,
+			// so we need to keep the original ciphertext around for the next try.
+			// TODO: decrypting into temporary buffer is much cleaner, we should switch to that
+			cloneTrap := make([]byte, len(trap))
+			copy(cloneTrap, trap)
+			if err = x.tryUnmarshalTrapPayload(cloneTrap, result, secParams, cursor); err == nil {
+				return nil
+			}
+		}
+		return fmt.Errorf("no credentials successfully unmarshaled trap: %w", err)
+	}
+	var sp SnmpV3SecurityParameters
+	if x.SecurityParameters != nil {
+		if err = x.SecurityParameters.InitSecurityKeys(); err != nil {
+			return
+		}
+		sp = x.SecurityParameters
+	}
+	return x.tryUnmarshalTrapPayload(trap, result, sp, cursor)
+}
+
+func (x *GoSNMP) tryUnmarshalTrapPayload(trap []byte, result *SnmpPacket, expectedSec SnmpV3SecurityParameters, cursor int) (err error) {
 	if result.Version == Version3 {
 		if result.SecurityModel == UserSecurityModel {
-			err = x.testAuthentication(trap, result, useResponseSecurityParameters)
-			if err != nil {
+			sp1 := result.SecurityParameters.(*UsmSecurityParameters) // these are parsed from the wire
+			sp2 := expectedSec.(*UsmSecurityParameters)               // these are the credentials we are expecting, a single set or a list when TrapSecurityParametersTable is involved
+
+			if sp1.UserName != sp2.UserName { // TODO: move to unmarshalTrapPayload
+				return errors.New("unexpected username")
+			}
+			sp1.AuthenticationProtocol, sp1.PrivacyProtocol = sp2.AuthenticationProtocol, sp2.PrivacyProtocol
+			sp1.AuthenticationPassphrase, sp1.PrivacyPassphrase = sp2.AuthenticationPassphrase, sp2.PrivacyPassphrase
+			if sp1.AuthoritativeEngineID == sp2.AuthoritativeEngineID {
+				sp1.SecretKey, sp1.PrivacyKey = sp2.SecretKey, sp2.PrivacyKey
+			} else {
+				sp1.SecretKey, sp1.PrivacyKey = nil, nil
+			}
+			if err = sp1.initSecurityKeysNoLock(); err != nil {
+				return
+			}
+
+			if err = x.testAuthentication(trap, result, true); err != nil {
 				x.Logger.Printf("UnmarshalTrap v3 auth: %s\n", err)
-				return nil, err
+				return err
 			}
 		}
 
 		trap, cursor, err = x.decryptPacket(trap, cursor, result)
 		if err != nil {
 			x.Logger.Printf("UnmarshalTrap v3 decrypt: %s\n", err)
-			return nil, err
+			return err
 		}
 	}
 	err = x.unmarshalPayload(trap, cursor, result)
 	if err != nil {
 		x.Logger.Printf("UnmarshalTrap: %s\n", err)
-		return nil, err
+		return err
 	}
-	return result, nil
+	return nil
 }

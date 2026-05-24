@@ -880,6 +880,8 @@ func (sp *UsmSecurityParameters) decryptPacket(packet []byte, cursor int) ([]byt
 	}
 
 	switch sp.PrivacyProtocol {
+	default:
+		return nil, errors.New("error decrypting ScopedPDU: privacy protocol is not configured")
 	case AES, AES192, AES256, AES192C, AES256C:
 		var iv [16]byte
 		binary.BigEndian.PutUint32(iv[:], sp.AuthoritativeEngineBoots)
@@ -1005,17 +1007,8 @@ func (sp *UsmSecurityParameters) unmarshal(flags SnmpV3MsgFlags, packet []byte, 
 	}
 	cursor += count
 	if AuthoritativeEngineID, ok := rawMsgAuthoritativeEngineID.(string); ok {
-		if sp.AuthoritativeEngineID != AuthoritativeEngineID {
-			sp.AuthoritativeEngineID = AuthoritativeEngineID
-			sp.SecretKey = nil
-			sp.PrivacyKey = nil
-
-			sp.Logger.Printf("Parsed authoritativeEngineID %0x", []byte(AuthoritativeEngineID))
-			err = sp.initSecurityKeysNoLock()
-			if err != nil {
-				return 0, err
-			}
-		}
+		sp.AuthoritativeEngineID = AuthoritativeEngineID
+		sp.Logger.Printf("Parsed authoritativeEngineID %0x", []byte(AuthoritativeEngineID))
 	}
 
 	rawMsgAuthoritativeEngineBoots, count, err := parseRawField(sp.Logger, packet[cursor:], "msgAuthoritativeEngineBoots")
@@ -1073,11 +1066,6 @@ func (sp *UsmSecurityParameters) unmarshal(flags SnmpV3MsgFlags, packet []byte, 
 	if msgPrivacyParameters, ok := rawMsgPrivacyParameters.(string); ok {
 		sp.PrivacyParameters = []byte(msgPrivacyParameters)
 		sp.Logger.Printf("Parsed privacyParameters %s", msgPrivacyParameters)
-		if flags&AuthPriv >= AuthPriv {
-			if sp.PrivacyProtocol <= NoPriv {
-				return 0, errors.New("error parsing SNMPv3 User Security Model: privacy parameters are not configured to parse incoming encrypted message")
-			}
-		}
 	}
 
 	return cursor, nil

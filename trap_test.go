@@ -1013,7 +1013,7 @@ func TestSendV3TrapAuthNoPrivFailsWithNoAuthNoPriv(t *testing.T) {
 
 	tl.OnNewTrap = makeTestTrapHandler(done, Version3)
 	tl.Params = newTestGoSNMPv3(AuthNoPriv, sp)
-	tl.Params.Logger = NewLogger(&testLogger{matcher: "incoming packet is not authentic", out: found})
+	tl.Params.Logger = NewLogger(&testLogger{matcher: "insufficient security level in received trap", out: found})
 
 	gs := newTestGoSNMPv3(NoAuthNoPriv, &UsmSecurityParameters{
 		UserName:                 "test",
@@ -1228,7 +1228,9 @@ func TestReceiveV3AuthPrivInformReportsUnknownEngineIDBeforeDecrypt(t *testing.T
 	foreignEngineID := string([]byte{0x80, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x05})
 	logger := NewLogger(log.New(io.Discard, "", 0))
 
-	tl, target, port := startTestV3TrapListener(t, &UsmSecurityParameters{
+	tl := NewTrapListener()
+	tl.OnNewTrap = makeTestTrapHandler(handled, Version3)
+	tl.Params = newTestGoSNMPv3(AuthPriv, &UsmSecurityParameters{
 		UserName:                 "test",
 		AuthenticationProtocol:   SHA,
 		AuthenticationPassphrase: "password",
@@ -1237,12 +1239,7 @@ func TestReceiveV3AuthPrivInformReportsUnknownEngineIDBeforeDecrypt(t *testing.T
 		AuthoritativeEngineBoots: 1,
 		AuthoritativeEngineTime:  1,
 		AuthoritativeEngineID:    localEngineID,
-	}, AuthPriv, makeTestTrapHandler(handled, Version3))
-	defer tl.Close()
-
-	conn, err := net.Dial(udp, net.JoinHostPort(target, strconv.Itoa(int(port))))
-	require.NoError(t, err)
-	defer conn.Close()
+	})
 
 	security := &UsmSecurityParameters{
 		UserName:                 "test",
@@ -1276,17 +1273,21 @@ func TestReceiveV3AuthPrivInformReportsUnknownEngineIDBeforeDecrypt(t *testing.T
 		Logger: logger,
 	}
 	require.NoError(t, packet.SecurityParameters.InitPacket(packet))
-	require.NoError(t, sendRawV3Packet(conn, packet))
 
-	response := readRawV3Response(t, conn)
-	decoder := newTestGoSNMPv3(NoAuthNoPriv, &UsmSecurityParameters{})
-	decoder.Logger = logger
-	result, err := decoder.UnmarshalTrap(response, true)
+	msg, err := packet.marshalMsg()
 	require.NoError(t, err)
-	require.Equal(t, Report, result.PDUType)
-	require.Equal(t, usmStatsUnknownEngineIDs, result.Variables[0].Name)
-	require.Equal(t, uint32(0), result.RequestID)
-	require.Equal(t, localEngineID, result.SecurityParameters.(*UsmSecurityParameters).AuthoritativeEngineID)
+
+	var response *SnmpPacket
+	tl.handleTrapMessage(msg, &net.UDPAddr{IP: net.ParseIP(trapTestAddress)}, func(packet *SnmpPacket) error {
+		response = packet
+		return nil
+	})
+
+	require.NotNil(t, response, "expected unknownEngineID Report")
+	require.Equal(t, Report, response.PDUType)
+	require.Equal(t, usmStatsUnknownEngineIDs, response.Variables[0].Name)
+	require.Equal(t, uint32(0), response.RequestID)
+	require.Equal(t, localEngineID, response.SecurityParameters.(*UsmSecurityParameters).AuthoritativeEngineID)
 
 	select {
 	case err := <-handled:
@@ -1314,16 +1315,6 @@ func sendRawV3Packet(conn net.Conn, packet *SnmpPacket) error {
 	}
 	_, err = conn.Write(msg)
 	return err
-}
-
-func readRawV3Response(t *testing.T, conn net.Conn) []byte {
-	t.Helper()
-
-	require.NoError(t, conn.SetReadDeadline(time.Now().Add(2*time.Second)))
-	buf := make([]byte, 4096)
-	n, err := conn.Read(buf)
-	require.NoError(t, err)
-	return buf[:n]
 }
 
 func requireNoRawResponse(t *testing.T, conn net.Conn) {
