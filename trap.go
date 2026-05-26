@@ -5,7 +5,6 @@
 package gosnmp
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -279,7 +278,7 @@ func (t *TrapListener) handleTrapMessage(msg []byte, remote *net.UDPAddr, respon
 				// According to RFC3414 3.2.3b: stop processing and report
 				// the listener authoritative engine ID
 				atomic.AddUint32(&t.usmStatsUnknownEngineIDsCount, 1)
-				err := t.reportAuthoritativeEngineID(trap, snmpEngineID, respond)
+				err := t.reportAuthoritativeEngineID(respond, snmpEngineID, packetSecurityParams.UserName, trap)
 				if err != nil {
 					t.Params.Logger.Printf("TrapListener: %s\n", err)
 				}
@@ -322,24 +321,27 @@ func (t *TrapListener) handleTrapMessage(msg []byte, remote *net.UDPAddr, respon
 	}
 }
 
-func (t *TrapListener) reportAuthoritativeEngineID(trap *SnmpPacket, snmpEngineID string, respond func(*SnmpPacket) error) error {
-	newSecurityParams, ok := trap.SecurityParameters.Copy().(*UsmSecurityParameters)
-	if !ok {
-		return errors.New("unable to cast SecurityParams to UsmSecurityParameters")
-	}
-	newSecurityParams.AuthoritativeEngineID = snmpEngineID
-	reportPacket := trap
-	reportPacket.PDUType = Report
-	reportPacket.MsgFlags &= AuthPriv
-	reportPacket.SecurityParameters = newSecurityParams
-	reportPacket.Variables = []SnmpPDU{
-		{
-			Name:  usmStatsUnknownEngineIDs,
-			Value: int(atomic.LoadUint32(&t.usmStatsUnknownEngineIDsCount)),
-			Type:  Integer,
+func (t *TrapListener) reportAuthoritativeEngineID(respond func(*SnmpPacket) error, engineID string, userName string, req *SnmpPacket) error {
+	return respond(&SnmpPacket{
+		Version:       Version3,
+		MsgID:         req.MsgID,
+		MsgFlags:      NoAuthNoPriv,
+		SecurityModel: UserSecurityModel,
+		SecurityParameters: &UsmSecurityParameters{
+			AuthoritativeEngineID:    engineID,
+			AuthoritativeEngineBoots: 1,
+			AuthoritativeEngineTime:  1,
+			UserName:                 userName,
 		},
-	}
-	return respond(reportPacket)
+		ContextEngineID: engineID,
+		PDUType:         Report,
+		RequestID:       0, // TODO: if the source message is not AuthPriv, its requestID should be used here?
+		Variables: []SnmpPDU{{
+			Name:  usmStatsUnknownEngineIDs,
+			Value: atomic.LoadUint32(&t.usmStatsUnknownEngineIDsCount),
+			Type:  Counter32,
+		}},
+	})
 }
 
 func (t *TrapListener) handleTCPRequest(conn net.Conn) {
