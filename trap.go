@@ -299,8 +299,8 @@ func (t *TrapListener) handleTrapMessage(msg []byte, remote *net.UDPAddr, respon
 
 		// Reuse the packet, since we're supposed to send it back
 		// with the exact same variables unless there's an error.
-		// Change the PDUType to the response, though.
-		trap.PDUType = GetResponse
+		trap.PDUType = GetResponse         // Patch the PDUType
+		trap.MsgFlags.SetReportable(false) // Clear Reportable flag
 
 		// If the response can be sent, the error-status is
 		// supposed to be set to noError and the error-index set to
