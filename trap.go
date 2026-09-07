@@ -260,33 +260,11 @@ func (t *TrapListener) handleTrapMessage(msg []byte, remote *net.UDPAddr, respon
 		t.Params.Logger.Printf("TrapListener: error in UnmarshalTrap %s\n", err)
 		return
 	}
-	if trap.Version == Version3 && trap.SecurityModel == UserSecurityModel && t.Params.SecurityModel == UserSecurityModel {
-		securityParams, ok := t.Params.SecurityParameters.(*UsmSecurityParameters)
-		if !ok {
-			t.Params.Logger.Printf("TrapListener: Invalid SecurityParameters types")
-		}
-		packetSecurityParams, ok := trap.SecurityParameters.(*UsmSecurityParameters)
-		if !ok {
-			t.Params.Logger.Printf("TrapListener: Invalid SecurityParameters types")
-		}
-		snmpEngineID := securityParams.AuthoritativeEngineID
-		msgAuthoritativeEngineID := packetSecurityParams.AuthoritativeEngineID
-		if msgAuthoritativeEngineID != snmpEngineID {
-			if len(msgAuthoritativeEngineID) < 5 || len(msgAuthoritativeEngineID) > 32 {
-				// RFC3411 section 5. – SnmpEngineID definition.
-				// SnmpEngineID is an OCTET STRING which size should be between 5 and 32
-				// According to RFC3414 3.2.3b: stop processing and report
-				// the listener authoritative engine ID
-				atomic.AddUint32(&t.usmStatsUnknownEngineIDsCount, 1)
-				err := t.reportAuthoritativeEngineID(respond, snmpEngineID, packetSecurityParams.UserName, trap)
-				if err != nil {
-					t.Params.Logger.Printf("TrapListener: %s\n", err)
-				}
-				return
-			}
-			// RFC3414 3.2.3a: Continue processing
-		}
+
+	if !t.verifyAuthoritativeEngineID(trap, respond) {
+		return
 	}
+
 	// Here we assume that t.OnNewTrap will not alter the contents
 	// of the PDU (per documentation, because Go does not have
 	// compile-time const checking).  We don't pass a copy because
@@ -319,6 +297,50 @@ func (t *TrapListener) handleTrapMessage(msg []byte, remote *net.UDPAddr, respon
 			t.Params.Logger.Printf("TrapListener: %s\n", err)
 		}
 	}
+}
+
+func (t *TrapListener) verifyAuthoritativeEngineID(msg *SnmpPacket, respond func(*SnmpPacket) error) bool {
+	if msg.Version != Version3 || msg.SecurityModel != UserSecurityModel || t.Params.SecurityModel != UserSecurityModel {
+		return true
+	}
+	localSec, ok := t.Params.SecurityParameters.(*UsmSecurityParameters)
+	if !ok {
+		t.Params.Logger.Printf("TrapListener: local SecurityParameters not USM\n")
+		return true
+	}
+	msgSec, ok := msg.SecurityParameters.(*UsmSecurityParameters)
+	if !ok {
+		t.Params.Logger.Printf("TrapListener: message SecurityParameters not USM\n")
+		return true
+	}
+
+	// RFC3411 section 5: SnmpEngineID is an OCTET STRING of 5 to 32 octets.
+	remoteEngineIDValid := len(msgSec.AuthoritativeEngineID) >= 5 && len(msgSec.AuthoritativeEngineID) <= 32
+
+	//RFC 3412 section 6.4: if known, PDU class trumps flag
+	reportable := msg.PDUType.ConfirmedClass()
+	if !msg.PDUType.Valid() {
+		reportable = msg.MsgFlags.Reportable()
+	}
+
+	// RFC3414 section 1.5.1: for an Unconfirmed Class PDU, the sender is authoritative.
+	// RFC3414 section 3.2 step 3a permits a non-authoritative receiver to continue processing a valid foreign engine ID.
+	if remoteEngineIDValid && msg.PDUType.UnconfirmedClass() {
+		return true
+	}
+
+	if remoteEngineIDValid && msg.PDUType.ConfirmedClass() && msgSec.AuthoritativeEngineID == localSec.AuthoritativeEngineID {
+		return true
+	}
+
+	if reportable {
+		atomic.AddUint32(&t.usmStatsUnknownEngineIDsCount, 1)
+		if err := t.reportAuthoritativeEngineID(respond, localSec.AuthoritativeEngineID, msgSec.UserName, msg); err != nil {
+			t.Params.Logger.Printf("TrapListener: %s\n", err)
+		}
+	}
+
+	return false
 }
 
 func (t *TrapListener) reportAuthoritativeEngineID(respond func(*SnmpPacket) error, engineID string, userName string, req *SnmpPacket) error {
